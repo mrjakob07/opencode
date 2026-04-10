@@ -1,4 +1,5 @@
 import z from "zod"
+import { Effect } from "effect"
 import { Tool } from "./tool"
 import DESCRIPTION from "./websearch.txt"
 import { abortAfterAny } from "../util/abort"
@@ -62,89 +63,96 @@ export const WebSearchTool = Tool.define("websearch", async () => {
       return DESCRIPTION.replace("{{year}}", new Date().getFullYear().toString())
     },
     parameters: Parameters,
-    async execute(params, ctx) {
-      await ctx.ask({
-        permission: "websearch",
-        patterns: [params.query],
-        always: ["*"],
-        metadata: {
-          query: params.query,
-          numResults: params.numResults,
-          livecrawl: params.livecrawl,
-          type: params.type,
-          contextMaxCharacters: params.contextMaxCharacters,
-        },
-      })
+    execute: (params, ctx) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            ctx.ask({
+              permission: "websearch",
+              patterns: [params.query],
+              always: ["*"],
+              metadata: {
+                query: params.query,
+                numResults: params.numResults,
+                livecrawl: params.livecrawl,
+                type: params.type,
+                contextMaxCharacters: params.contextMaxCharacters,
+              },
+            }),
+          )
 
-      const searchRequest: McpSearchRequest = {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: {
-          name: "web_search_exa",
-          arguments: {
-            query: params.query,
-            type: params.type || "auto",
-            numResults: params.numResults || API_CONFIG.DEFAULT_NUM_RESULTS,
-            livecrawl: params.livecrawl || "fallback",
-            contextMaxCharacters: params.contextMaxCharacters,
-          },
-        },
-      }
+          const request: McpSearchRequest = {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: {
+              name: "web_search_exa",
+              arguments: {
+                query: params.query,
+                type: params.type || "auto",
+                numResults: params.numResults || API_CONFIG.DEFAULT_NUM_RESULTS,
+                livecrawl: params.livecrawl || "fallback",
+                contextMaxCharacters: params.contextMaxCharacters,
+              },
+            },
+          }
 
-      const { signal, clearTimeout } = abortAfterAny(25000, ctx.abort)
+          const { signal, clearTimeout } = abortAfterAny(25000, ctx.abort)
 
-      try {
-        const headers: Record<string, string> = {
-          accept: "application/json, text/event-stream",
-          "content-type": "application/json",
-        }
+          try {
+            const headers: Record<string, string> = {
+              accept: "application/json, text/event-stream",
+              "content-type": "application/json",
+            }
 
-        const response = await fetch(`${API_CONFIG.BASE_URL}${API_CONFIG.ENDPOINTS.SEARCH}`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(searchRequest),
-          signal,
-        })
+            const response = yield* Effect.promise(() =>
+              fetch(`${API_CONFIG.BASE_URL}${API_CONFIG.ENDPOINTS.SEARCH}`, {
+                method: "POST",
+                headers,
+                body: JSON.stringify(request),
+                signal,
+              }),
+            )
 
-        clearTimeout()
+            clearTimeout()
 
-        if (!response.ok) {
-          const errorText = await response.text()
-          throw new Error(`Search error (${response.status}): ${errorText}`)
-        }
+            if (!response.ok) {
+              const text = yield* Effect.promise(() => response.text())
+              throw new Error(`Search error (${response.status}): ${text}`)
+            }
 
-        const responseText = await response.text()
+            const body = yield* Effect.promise(() => response.text())
 
-        // Parse SSE response
-        const lines = responseText.split("\n")
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const data: McpSearchResponse = JSON.parse(line.substring(6))
-            if (data.result && data.result.content && data.result.content.length > 0) {
-              return {
-                output: data.result.content[0].text,
-                title: `Web search: ${params.query}`,
-                metadata: {},
+            // Parse SSE response
+            const lines = body.split("\n")
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                const data: McpSearchResponse = JSON.parse(line.substring(6))
+                if (data.result && data.result.content && data.result.content.length > 0) {
+                  return {
+                    output: data.result.content[0].text,
+                    title: `Web search: ${params.query}`,
+                    metadata: {},
+                  }
+                }
               }
             }
+
+            return {
+              output: "No search results found. Please try a different query.",
+              title: `Web search: ${params.query}`,
+              metadata: {},
+            }
+          } catch (error) {
+            clearTimeout()
+
+            if (error instanceof Error && error.name === "AbortError") {
+              throw new Error("Search request timed out")
+            }
+
+            throw error
           }
-        }
-
-        return {
-          output: "No search results found. Please try a different query.",
-          title: `Web search: ${params.query}`,
-          metadata: {},
-        }
-      } catch (error) {
-        clearTimeout()
-
-        if (error instanceof Error && error.name === "AbortError") {
-          throw new Error("Search request timed out")
-        }
-
-        throw error
-      }
-    },
+        }),
+      ),
   }
 })
