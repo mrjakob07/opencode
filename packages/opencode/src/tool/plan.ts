@@ -1,5 +1,6 @@
 import z from "zod"
 import path from "path"
+import { Effect } from "effect"
 import { Tool } from "./tool"
 import { Question } from "../question"
 import { Session } from "../session"
@@ -19,56 +20,63 @@ async function getLastModel(sessionID: SessionID) {
 export const PlanExitTool = Tool.define("plan_exit", {
   description: EXIT_DESCRIPTION,
   parameters: z.object({}),
-  async execute(_params, ctx) {
-    const session = await Session.get(ctx.sessionID)
-    const plan = path.relative(Instance.worktree, Session.plan(session))
-    const answers = await Question.ask({
-      sessionID: ctx.sessionID,
-      questions: [
-        {
-          question: `Plan at ${plan} is complete. Would you like to switch to the build agent and start implementing?`,
-          header: "Build Agent",
-          custom: false,
-          options: [
-            { label: "Yes", description: "Switch to build agent and start implementing the plan" },
-            { label: "No", description: "Stay with plan agent to continue refining the plan" },
-          ],
-        },
-      ],
-      tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
-    })
+  execute: (_params, ctx) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const session = yield* Effect.promise(() => Session.get(ctx.sessionID))
+        const plan = path.relative(Instance.worktree, Session.plan(session))
+        const answers = yield* Effect.promise(() =>
+          Question.ask({
+            sessionID: ctx.sessionID,
+            questions: [
+              {
+                question: `Plan at ${plan} is complete. Would you like to switch to the build agent and start implementing?`,
+                header: "Build Agent",
+                custom: false,
+                options: [
+                  { label: "Yes", description: "Switch to build agent and start implementing the plan" },
+                  { label: "No", description: "Stay with plan agent to continue refining the plan" },
+                ],
+              },
+            ],
+            tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
+          }),
+        )
 
-    const answer = answers[0]?.[0]
-    if (answer === "No") throw new Question.RejectedError()
+        const answer = answers[0]?.[0]
+        if (answer === "No") throw new Question.RejectedError()
 
-    const model = await getLastModel(ctx.sessionID)
+        const model = yield* Effect.promise(() => getLastModel(ctx.sessionID))
 
-    const userMsg: MessageV2.User = {
-      id: MessageID.ascending(),
-      sessionID: ctx.sessionID,
-      role: "user",
-      time: {
-        created: Date.now(),
-      },
-      agent: "build",
-      model,
-    }
-    await Session.updateMessage(userMsg)
-    await Session.updatePart({
-      id: PartID.ascending(),
-      messageID: userMsg.id,
-      sessionID: ctx.sessionID,
-      type: "text",
-      text: `The plan at ${plan} has been approved, you can now edit files. Execute the plan`,
-      synthetic: true,
-    } satisfies MessageV2.TextPart)
+        const msg: MessageV2.User = {
+          id: MessageID.ascending(),
+          sessionID: ctx.sessionID,
+          role: "user",
+          time: {
+            created: Date.now(),
+          },
+          agent: "build",
+          model,
+        }
+        yield* Effect.promise(() => Session.updateMessage(msg))
+        yield* Effect.promise(() =>
+          Session.updatePart({
+            id: PartID.ascending(),
+            messageID: msg.id,
+            sessionID: ctx.sessionID,
+            type: "text",
+            text: `The plan at ${plan} has been approved, you can now edit files. Execute the plan`,
+            synthetic: true,
+          } satisfies MessageV2.TextPart),
+        )
 
-    return {
-      title: "Switching to build agent",
-      output: "User approved switching to build agent. Wait for further instructions.",
-      metadata: {},
-    }
-  },
+        return {
+          title: "Switching to build agent",
+          output: "User approved switching to build agent. Wait for further instructions.",
+          metadata: {},
+        }
+      }),
+    ),
 })
 
 /*
